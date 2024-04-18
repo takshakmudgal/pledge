@@ -101,12 +101,16 @@ pub fn process_instruction(
         ),
         1 => update_reward(account_info, Clock::get()?.unix_timestamp.try_into().expect("Conversion from i64 to u64 failed")),
         2 => view_rewards(account_info),
+        3 => claim_rewards(
+            &accounts,
+        ),
         _ => {
             msg!("Instruction not recognized");
             Err(ProgramError::InvalidInstructionData)
         }
     }
 }
+
 
 pub fn buy_pledge(
     account_info: &AccountInfo,
@@ -171,6 +175,53 @@ pub fn view_rewards(account_info: &AccountInfo) -> ProgramResult {
 
     Ok(())
 }
+
+pub fn claim_rewards(
+    accounts: &[AccountInfo],
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let account_info = next_account_info(account_info_iter)?;
+
+    let user_state = UserState::try_from_slice(&account_info.data.borrow())?;
+    let pledge_contract = PledgeContract::new();
+
+    if user_state.solhit_rewards == 0 {
+        msg!("No rewards to claim");
+        return Ok(());
+    }
+
+    let solhit_token_account_info = next_account_info(account_info_iter)?;
+
+    let transfer_to_user_amount = user_state.solhit_rewards;
+    let remaining_solhit_tokens = pledge_contract.solhit_token_supply.saturating_sub(pledge_contract.locked_solhit_tokens);
+
+    if transfer_to_user_amount > remaining_solhit_tokens {
+        msg!("Not enough Solheist tokens in the contract");
+        return Err(ProgramError::InsufficientFunds);
+    }
+
+    // Transfer Solheist tokens to the user
+    solana_program::program::invoke_signed(
+        &solana_program::system_instruction::transfer(
+            &solhit_token_account_info.key,
+            account_info.key,
+            transfer_to_user_amount,
+        ),
+        &[solhit_token_account_info.clone(), account_info.clone()],
+        &[],
+    )?;
+
+    let mut user_state = UserState::try_from_slice(&account_info.data.borrow())?;
+    user_state.solhit_rewards = 0;
+
+    let serialized_user_state = serialize_user_state(&user_state)?;
+    account_info.data.borrow_mut().copy_from_slice(&serialized_user_state);
+
+    msg!("Rewards claimed successfully");
+
+    Ok(())
+}
+
 
 fn serialize_user_state(user_state: &UserState) -> Result<Vec<u8>, ProgramError> {
     let mut buf = vec![];
