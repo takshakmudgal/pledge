@@ -6,19 +6,19 @@ use solana_program::{
     msg,
     program_error::ProgramError,
     pubkey::Pubkey,
-    sysvar::{clock::Clock, Sysvar}, 
+    sysvar::{clock::Clock, Sysvar},
 };
+use std::convert::TryInto;
 
 // Define constants
-pub const TOTAL_PLEDGE_SUPPLY: u64 = 100_000_000; // Total supply of Pledge tokens
-pub const TOTAL_SOLHIT_SUPPLY: u64 = 14_000_000; // Total supply of Solheist tokens
-pub const LOCKED_SOLHIT_TOKENS: u64 = 4_000_000; // Solheist tokens reserved for rewards
-pub const VESTING_PERIOD: u64 = 63_072_000; // 2 years in seconds
-pub const REWARD_RATE: u64 = 40; // 1 Pledge token = 40 Solheist tokens
+pub const TOTAL_PLEDGE_SUPPLY: u64 = 100_000_000;
+pub const TOTAL_SOLHIT_SUPPLY: u64 = 14_000_000;
+pub const LOCKED_SOLHIT_TOKENS: u64 = 4_000_000;
+pub const VESTING_PERIOD: u64 = 63_072_000;
+pub const REWARD_RATE: u64 = 40;
 
-// Define sale phases
-pub const PHASE_DURATIONS: [u64; 5] = [1296000, 1296000, 1296000, 1296000, u64::MAX];
-pub const PHASE_RATES: [u64; 5] = [2, 175, 150, 125, 100];
+pub const PHASE_DURATIONS: [u64; 5] = [1_296_000, 1_296_000, 1_296_000, 1_296_000, u64::MAX];
+pub const PHASE_RATES: [u64; 5] = [200, 175, 150, 125, 100];
 
 // Define state variables
 pub struct PledgeContract {
@@ -45,15 +45,44 @@ impl PledgeContract {
     }
 }
 
-// Define user-specific data
-#[derive(BorshDeserialize, BorshSerialize)]
 pub struct UserState {
     pub locked_pledge_tokens: u64,
     pub solhit_rewards: u64,
     pub lock_start_time: u64,
+    pub vesting_end_time: u64,
 }
 
-// Entry point
+impl BorshSerialize for UserState {
+    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        self.locked_pledge_tokens.serialize(writer)?;
+        self.solhit_rewards.serialize(writer)?;
+        self.lock_start_time.serialize(writer)?;
+        self.vesting_end_time.serialize(writer)
+    }
+}
+
+impl BorshDeserialize for UserState {
+    fn deserialize(buf: &mut &[u8]) -> std::io::Result<Self> {
+        let locked_pledge_tokens = u64::deserialize(buf)?;
+        let solhit_rewards = u64::deserialize(buf)?;
+        let lock_start_time = u64::deserialize(buf)?;
+        let vesting_end_time = u64::deserialize(buf)?;
+
+        Ok(Self {
+            locked_pledge_tokens,
+            solhit_rewards,
+            lock_start_time,
+            vesting_end_time,
+        })
+    }
+
+    fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+        let mut buf = vec![];
+        reader.read_to_end(&mut buf)?;
+        Self::deserialize(&mut buf.as_slice())
+    }
+}
+
 entrypoint!(process_instruction);
 
 pub fn process_instruction(
@@ -65,7 +94,6 @@ pub fn process_instruction(
     let account_info = next_account_info(account_info_iter)?;
 
     match instruction_data[0] {
-        // Handle different instructions
         0 => buy_pledge(
             account_info,
             u64::from_le_bytes(instruction_data[1..9].try_into().unwrap()),
@@ -80,7 +108,6 @@ pub fn process_instruction(
     }
 }
 
-// BuyPledge instruction handler
 pub fn buy_pledge(
     account_info: &AccountInfo,
     amount: u64,
@@ -89,19 +116,25 @@ pub fn buy_pledge(
     let mut user_state = UserState::try_from_slice(&account_info.data.borrow())?;
     let pledge_contract = PledgeContract::new();
 
-    // Validate purchase
     let sale_phase = get_sale_phase(current_time, &pledge_contract.phase_durations);
     let rate = pledge_contract.phase_rates[sale_phase];
 
-    // Mint tokens
     let pledge_tokens = (amount * rate) / 100;
+
+    if pledge_tokens > pledge_contract.total_pledge_supply - user_state.locked_pledge_tokens {
+        return Err(ProgramError::InvalidArgument);
+    }
+
     user_state.locked_pledge_tokens += pledge_tokens;
     user_state.lock_start_time = current_time;
+    user_state.vesting_end_time = user_state.vesting_end_time.max(current_time + pledge_contract.vesting_period);
+
+    let serialized_user_state = serialize_user_state(&user_state)?;
+    account_info.data.borrow_mut().copy_from_slice(&serialized_user_state);
 
     Ok(())
 }
 
-// UpdateReward instruction handler
 pub fn update_reward(
     account_info: &AccountInfo,
     current_time: u64,
@@ -109,20 +142,28 @@ pub fn update_reward(
     let mut user_state = UserState::try_from_slice(&account_info.data.borrow())?;
     let pledge_contract = PledgeContract::new();
 
-    // Calculate elapsed time
-    let elapsed_time = current_time - user_state.lock_start_time;
+    let elapsed_time = current_time.saturating_sub(user_state.lock_start_time);
 
-    // Calculate rewards
     if elapsed_time >= pledge_contract.vesting_period {
-        let solhit_rewards = user_state.locked_pledge_tokens * pledge_contract.reward_rate;
-        user_state.solhit_rewards += solhit_rewards;
+        let solhit_rewards = (user_state.locked_pledge_tokens as u128 * pledge_contract.reward_rate as u128) as u64;
+        user_state.solhit_rewards = user_state.solhit_rewards.saturating_add(solhit_rewards);
         user_state.lock_start_time = current_time;
+        unlock_vested_tokens(&mut user_state);
+    } else if current_time >= user_state.vesting_end_time {
+        unlock_vested_tokens(&mut user_state);
     }
+
+    let serialized_user_state = serialize_user_state(&user_state)?;
+    account_info.data.borrow_mut().copy_from_slice(&serialized_user_state);
 
     Ok(())
 }
 
-// ViewRewards instruction handler
+fn unlock_vested_tokens(user_state: &mut UserState) {
+    user_state.locked_pledge_tokens = 0;
+    user_state.vesting_end_time = 0;
+}
+
 pub fn view_rewards(account_info: &AccountInfo) -> ProgramResult {
     let user_state = UserState::try_from_slice(&account_info.data.borrow())?;
 
@@ -131,7 +172,12 @@ pub fn view_rewards(account_info: &AccountInfo) -> ProgramResult {
     Ok(())
 }
 
-// Helper function to get the current sale phase
+fn serialize_user_state(user_state: &UserState) -> Result<Vec<u8>, ProgramError> {
+    let mut buf = vec![];
+    user_state.serialize(&mut buf)?;
+    Ok(buf)
+}
+
 fn get_sale_phase(current_time: u64, phase_durations: &[u64; 5]) -> usize {
     let mut elapsed_time = 0;
     for (i, &duration) in phase_durations.iter().enumerate() {

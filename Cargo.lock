@@ -2611,6 +2611,7 @@ dependencies = [
  "borsh 1.4.0",
  "solana-program",
  "solana-program-test",
+ "solana-sdk",
  "spl-token",
 ]
 
