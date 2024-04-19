@@ -136,6 +136,8 @@ pub fn buy_pledge(
     let serialized_user_state = serialize_user_state(&user_state)?;
     account_info.data.borrow_mut().copy_from_slice(&serialized_user_state);
 
+    emit_event(PledgeEvent::Purchase(amount, rate, user_state.locked_pledge_tokens));
+
     Ok(())
 }
 
@@ -159,6 +161,8 @@ pub fn update_reward(
 
     let serialized_user_state = serialize_user_state(&user_state)?;
     account_info.data.borrow_mut().copy_from_slice(&serialized_user_state);
+
+    emit_event(PledgeEvent::RewardUpdate(user_state.solhit_rewards, elapsed_time));
 
     Ok(())
 }
@@ -218,6 +222,7 @@ pub fn claim_rewards(
     account_info.data.borrow_mut().copy_from_slice(&serialized_user_state);
 
     msg!("Rewards claimed successfully");
+    emit_event(PledgeEvent::RewardClaim(user_state.solhit_rewards));
 
     Ok(())
 }
@@ -238,4 +243,27 @@ fn get_sale_phase(current_time: u64, phase_durations: &[u64; 5]) -> usize {
         }
     }
     phase_durations.len() - 1
+}
+
+pub enum PledgeEvent {
+    Purchase(u64, u64, u64), // amount, rate, total_pledge_tokens
+    RewardUpdate(u64, u64), // solhit_rewards, elapsed_time
+    RewardClaim(u64),       // solhit_rewards
+}
+
+pub fn emit_event(event: PledgeEvent) {
+    let event_data = match event {
+        PledgeEvent::Purchase(amount, rate, total_pledge_tokens) => {
+            format!("Pledge tokens purchased: {} at rate {} for total: {}", amount, rate, total_pledge_tokens)
+        },
+        PledgeEvent::RewardUpdate(solhit_rewards, elapsed_time) => {
+            format!("Rewards updated: Solheist Rewards: {} after elapsed time: {}", solhit_rewards, elapsed_time)
+        },
+        PledgeEvent::RewardClaim(solhit_rewards) => {
+            format!("Rewards claimed: Solheist Rewards: {}", solhit_rewards)
+        },
+    };
+
+    msg!("{}", event_data);
+    solana_program::log::sol_log(&event_data);
 }
