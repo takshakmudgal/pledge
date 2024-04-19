@@ -1,4 +1,5 @@
 use borsh::{BorshDeserialize, BorshSerialize};
+use borsh::io::Write;
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     entrypoint,
@@ -53,21 +54,21 @@ pub struct UserState {
 }
 
 impl BorshSerialize for UserState {
-    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+    fn serialize<W: Write>(&self, writer: &mut W) -> std::result::Result<(), std::io::Error> {
         self.locked_pledge_tokens.serialize(writer)?;
         self.solhit_rewards.serialize(writer)?;
         self.lock_start_time.serialize(writer)?;
-        self.vesting_end_time.serialize(writer)
+        self.vesting_end_time.serialize(writer)?;
+        Ok(())
     }
 }
 
 impl BorshDeserialize for UserState {
-    fn deserialize(buf: &mut &[u8]) -> std::io::Result<Self> {
+    fn deserialize(buf: &mut &[u8]) -> std::result::Result<Self, std::io::Error> {
         let locked_pledge_tokens = u64::deserialize(buf)?;
         let solhit_rewards = u64::deserialize(buf)?;
         let lock_start_time = u64::deserialize(buf)?;
         let vesting_end_time = u64::deserialize(buf)?;
-
         Ok(Self {
             locked_pledge_tokens,
             solhit_rewards,
@@ -152,7 +153,9 @@ pub fn update_reward(
 
     if elapsed_time >= pledge_contract.vesting_period {
         let solhit_rewards = (user_state.locked_pledge_tokens as u128 * pledge_contract.reward_rate as u128) as u64;
+        println!("Calculated solhit_rewards: {}", solhit_rewards);  // Debug print
         user_state.solhit_rewards = user_state.solhit_rewards.saturating_add(solhit_rewards);
+        println!("Updated solhit_rewards in UserState: {}", user_state.solhit_rewards);  // Debug print
         user_state.lock_start_time = current_time;
         unlock_vested_tokens(&mut user_state);
     } else if current_time >= user_state.vesting_end_time {
@@ -231,6 +234,7 @@ pub fn claim_rewards(
 fn serialize_user_state(user_state: &UserState) -> Result<Vec<u8>, ProgramError> {
     let mut buf = vec![];
     user_state.serialize(&mut buf)?;
+    println!("Serialized UserState: {:?}", buf);  // Debug print
     Ok(buf)
 }
 
@@ -266,4 +270,122 @@ pub fn emit_event(event: PledgeEvent) {
 
     msg!("{}", event_data);
     solana_program::log::sol_log(&event_data);
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;    
+use crate::{buy_pledge, UserState, PledgeContract};
+use solana_program::{pubkey::Pubkey, account_info::AccountInfo};
+
+
+    #[test]
+fn test_buy_pledge() {
+    let mut account_data = vec![0u8; std::mem::size_of::<UserState>()];
+    let pubkey1 = Pubkey::new_unique();
+    let pubkey2 = Pubkey::new_unique();
+    let mut lamports = 0;
+    let account_info = AccountInfo::new(
+        &pubkey1,
+        false,
+        true,
+        &mut lamports,
+        &mut account_data,
+        &pubkey2,
+        false,
+        0,
+    );
+
+    let amount = 1000;
+    let current_time = 1_000_000;
+    let result = buy_pledge(&account_info, amount, current_time);
+    assert!(result.is_ok());
+
+    let user_state = UserState::try_from_slice(&account_info.data.borrow()).unwrap();
+    let pledge_contract = PledgeContract::new();
+    let sale_phase = get_sale_phase(current_time, &pledge_contract.phase_durations);
+    let rate = pledge_contract.phase_rates[sale_phase];
+    let expected_pledge_tokens = (amount * rate) / 100;
+
+    assert_eq!(user_state.locked_pledge_tokens, expected_pledge_tokens);
+    assert_eq!(user_state.lock_start_time, current_time);
+    assert_eq!(user_state.vesting_end_time, current_time + pledge_contract.vesting_period);
+}
+#[test]
+fn test_buy_pledge_vesting_period() {
+  let mut account_data = vec![0u8; std::mem::size_of::<UserState>()];
+  let pubkey = Pubkey::new_unique();
+  let mut lamports = 1000;
+  let account_info = AccountInfo::new(
+    &pubkey,
+    false,
+    true,
+    &mut lamports,
+    &mut account_data,
+    &pubkey,
+    false,
+    0,
+  );
+
+  let amount = 500;
+  let current_time = 1_000_000;
+
+  let _result = buy_pledge(&account_info, amount, current_time);
+
+  let user_state = UserState::try_from_slice(&account_info.data.borrow()).unwrap();
+  let pledge_contract = PledgeContract::new();
+
+  assert_eq!(user_state.vesting_end_time, current_time + pledge_contract.vesting_period);
+}
+
+#[test]
+fn test_buy_pledge_exceed_supply() {
+  let mut account_data = vec![0u8; std::mem::size_of::<UserState>()];
+  let pubkey = Pubkey::new_unique();
+  let mut lamports = 1000;
+  let account_info = AccountInfo::new(
+    &pubkey,
+    false,
+    true,
+    &mut lamports,
+    &mut account_data,
+    &pubkey,
+    false,
+    0,
+  );
+
+  let pledge_contract = PledgeContract::new();
+  let amount = pledge_contract.total_pledge_supply + 1;
+  let current_time = 1_000_000;
+
+  let result = buy_pledge(&account_info, amount, current_time);
+
+  assert!(result.is_err());
+}
+
+#[test]
+fn test_buy_pledge_invalid_amount() {
+  let mut account_data = vec![0u8; std::mem::size_of::<UserState>()];
+  let pubkey = Pubkey::new_unique();
+  let mut lamports = 1000;
+  let account_info = AccountInfo::new(
+    &pubkey,
+    false,
+    true,
+    &mut lamports,
+    &mut account_data,
+    &pubkey,
+    false,
+    0,
+  );
+
+  let amount = 0;
+  let current_time = 1_000_000;
+
+  let result = buy_pledge(&account_info, amount, current_time);
+
+  assert!(result.is_ok());
+}
+
 }

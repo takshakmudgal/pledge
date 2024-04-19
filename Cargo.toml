@@ -7,8 +7,8 @@ edition = "2021"
 
 [dependencies]
 solana-program = "1.18.11"
-spl-token = "4.0.0"
 borsh = "1.4.0"
 solana-program-test = "1.18.11"
 solana-sdk = "1.18.11"
 anchor-lang = "0.30.0"
+spl-token = "4.0.0"
